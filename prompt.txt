@@ -1,0 +1,8 @@
+Analyze the attached 3D mesh data (export_data.json) and orthogonal rendered views. 
+Determine the optimal UV seam layout to minimize UV stretching and hide seams in less visible areas.
+Take into account sharp edges and geometry flow.
+
+Output exactly ONE thing: a raw JSON array format containing the integer edge indices that should be marked as seams.
+Do NOT output code blocks (like ```json). DO NOT output any conversational text.
+Example format:
+[0, 15, 23, 42]
