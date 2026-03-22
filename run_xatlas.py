@@ -473,6 +473,24 @@ def main():
         triangle_area_ratio[i] = ratio
         triangle_log_ratio[i] = _math.log(ratio + EPS)
 
+    try:
+        out_dir = os.path.dirname(json_path)
+        stress_items = [
+            {"tri_idx": i, "stress": float(triangle_area_ratio[i]),
+             "orig_face": int(tri_to_face[i]) if i < len(tri_to_face) else -1}
+            for i in range(len(triangle_area_ratio))
+        ]
+        stress_report = {
+            "triangle_stress": stress_items,
+            "tri_chart_ids": tri_chart_ids if 'tri_chart_ids' in locals() else None,
+        }
+        stress_path = os.path.join(out_dir, "stress_report.json")
+        with open(stress_path, "w", encoding="utf-8") as sf:
+            json.dump(stress_report, sf, indent=2)
+        print(f"Wrote stress report to {stress_path}")
+    except Exception as _e:
+        print("Warning: failed to write stress_report.json:", _e)
+
 
     if atlas_vmapping is not None and atlas_indices is not None and atlas_uvs is not None:
         if 'degenerate_uv_count' in locals() and degenerate_uv_count:

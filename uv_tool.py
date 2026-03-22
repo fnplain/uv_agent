@@ -419,6 +419,85 @@ Example format:
         self.report({'INFO'}, f"Draft ready. Files saved to {temp_dir}")
         return {'FINISHED'}
 
+
+class MESH_OT_ApplyProposedCuts(bpy.types.Operator):
+    bl_idname = "mesh.apply_proposed_cuts"
+    bl_label = "Apply Proposed Cuts"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import bmesh
+        import json
+
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            self.report({'ERROR'}, "No mesh object selected!")
+            return {'CANCELLED'}
+
+        blend_dir = bpy.path.abspath("//") or bpy.app.tempdir
+        temp_dir = os.path.join(blend_dir, "uv_agent_shots")
+        proposed_path = os.path.join(temp_dir, "proposed_cuts.json")
+        import_path = os.path.join(temp_dir, "import_seams.json")
+
+        bpy.ops.object.mode_set(mode='EDIT')
+        bm = bmesh.from_edit_mesh(obj.data)
+
+        # Prefer import_seams.json (edge indices), fallback to proposed_cuts.json (vertex pairs)
+        if os.path.exists(import_path):
+            try:
+                with open(import_path, 'r', encoding='utf-8') as f:
+                    indices = json.load(f)
+                seam_indices = set(int(i) for i in indices)
+            except Exception as exc:
+                self.report({'ERROR'}, f"Failed to read import_seams.json: {exc}")
+                bpy.ops.object.mode_set(mode='OBJECT')
+                return {'CANCELLED'}
+
+            applied = 0
+            for edge in bm.edges:
+                if edge.index in seam_indices and not edge.seam:
+                    edge.seam = True
+                    applied += 1
+
+            bmesh.update_edit_mesh(obj.data)
+            bpy.ops.uv.unwrap(method='ANGLE_BASED', margin=0.01)
+            bpy.ops.object.mode_set(mode='OBJECT')
+            self.report({'INFO'}, f"Applied {applied} new seams from import_seams.json")
+            return {'FINISHED'}
+
+        if os.path.exists(proposed_path):
+            try:
+                with open(proposed_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                pairs = [tuple(sorted(item.get('verts', []))) for item in data.get('proposed_edges', [])]
+            except Exception as exc:
+                self.report({'ERROR'}, f"Failed to read proposed_cuts.json: {exc}")
+                bpy.ops.object.mode_set(mode='OBJECT')
+                return {'CANCELLED'}
+
+            # map vertex-pair -> bmesh edge
+            vertpair_to_edge = {}
+            for e in bm.edges:
+                a = e.verts[0].index; b = e.verts[1].index
+                vertpair_to_edge[tuple(sorted((a, b)))] = e
+
+            applied = 0
+            for key in pairs:
+                e = vertpair_to_edge.get(tuple(key))
+                if e and not e.seam:
+                    e.seam = True
+                    applied += 1
+
+            bmesh.update_edit_mesh(obj.data)
+            bpy.ops.uv.unwrap(method='ANGLE_BASED', margin=0.01)
+            bpy.ops.object.mode_set(mode='OBJECT')
+            self.report({'INFO'}, f"Applied {applied} proposed seams from proposed_cuts.json")
+            return {'FINISHED'}
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        self.report({'ERROR'}, "No import_seams.json or proposed_cuts.json found in uv_agent_shots")
+        return {'CANCELLED'}
+
 class MESH_OT_ImportSeams(bpy.types.Operator):
     bl_idname = "mesh.import_seams"
     bl_label = "Apply AI Seams"
@@ -481,20 +560,22 @@ class VIEW3D_PT_MyUVPanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator(MESH_OT_MyCustomUnwrapper.bl_idname)
-        layout.operator(MESH_OT_ImportSeams.bl_idname)
+        layout.operator(MESH_OT_MyCustomUnwrapper.bl_idname, text="Export Mesh (no AI)")
+        layout.operator(MESH_OT_ApplyProposedCuts.bl_idname, text="Apply Proposed Cuts")
+        layout.operator(MESH_OT_ImportSeams.bl_idname, text="Apply Import Seams (raw)")
         layout.separator()
-        layout.prop(context.scene, "myuv_auto_call_ai")
-        layout.prop(context.scene, "myuv_ai_endpoint")
-        layout.prop(context.scene, "myuv_ai_model")
-        layout.prop(context.scene, "myuv_ai_api_key")
-        layout.prop(context.scene, "myuv_ai_project")
-        layout.prop(context.scene, "myuv_ai_organization")
-        layout.prop(context.scene, "myuv_ai_timeout")
+        # layout.prop(context.scene, "myuv_auto_call_ai")
+        # layout.prop(context.scene, "myuv_ai_endpoint")
+        # layout.prop(context.scene, "myuv_ai_model")
+        # layout.prop(context.scene, "myuv_ai_api_key")
+        # layout.prop(context.scene, "myuv_ai_project")
+        # layout.prop(context.scene, "myuv_ai_organization")
+        # layout.prop(context.scene, "myuv_ai_timeout")
 
 classes = (
     MESH_OT_MyCustomUnwrapper,
     MESH_OT_ImportSeams,
+    MESH_OT_ApplyProposedCuts,
     VIEW3D_PT_MyUVPanel,
 )
 
