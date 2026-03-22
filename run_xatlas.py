@@ -283,44 +283,70 @@ def main():
     triangle_log_ratio = [0.0] * len(triangles)
     if atlas_vmapping is not None and atlas_indices is not None and atlas_uvs is not None:
         # Build map: sorted(orig_vertex_tuple) -> list of output-triangle indices
-        mapping = defaultdict(list)
-        for out_ti, out_tri in enumerate(atlas_indices):
-            orig_triple = tuple(int(atlas_vmapping[idx]) for idx in out_tri)
-            key = tuple(sorted(orig_triple))
-            mapping[key].append(out_ti)
-        # Precompute output uv list and output triangle uvs
-        out_uvs = [tuple(u) for u in atlas_uvs]
+        orig_uvs = defaultdict(list)
+        for out_vidx, orig_vidx in enumerate(atlas_vmapping):
+            try:
+                uv = tuple(map(float, atlas_uvs[out_vidx]))
+                orig_uvs[int(orig_vidx)].append(uv)
+            except Exception:
+                continue
+
+        # Helper: average aggregated UVs for an original vertex (or return None)
+        def avg_uv(uv_list):
+            if not uv_list:
+                return None
+            ux = sum(u for u,v in uv_list)/len(uv_list)
+            vx = sum(v for u,v in uv_list)/len(uv_list)
+            return (ux, vx)
 
         degenerate_uv_count = 0
+        multi_map_count = 0
 
     for i, in_tri in enumerate(triangles):
-        key = tuple(sorted(in_tri))
-        out_tri_indices = mapping.get(key)
-        if out_tri_indices:
-            out_ti = out_tri_indices[0]
-            uv_tri = atlas_indices[out_ti]
-            # compute 2D area from uv_tri referencing out_uvs
-            area2d = tri_area_2d(out_uvs, (uv_tri[0], uv_tri[1], uv_tri[2]))
-            area3d = tri_area_3d(vertices, in_tri)
-            if area2d <= EPS:
-                # degenerate UV triangle (zero area) — don't treat as infinite stress
-                triangle_area_ratio[i] = 1.0
-                triangle_log_ratio[i] = 0.0
-                degenerate_uv_count += 1
-            else:
-                area_ratio = area3d / area2d
-                # cap extremely large ratios to avoid infinities
-                area_ratio = min(area_ratio, 1e6)
-                triangle_area_ratio[i] = area_ratio
-                triangle_log_ratio[i] = _math.log(area_ratio + EPS)
-        else:
-            # fallback: no mapping found
+
+
+        a3 = vertices[in_tri[0]]; 
+        b3 = vertices[in_tri[1]];
+        c3 = vertices[in_tri[2]];
+
+        def dist3(p,q):
+            return _math.sqrt((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2)
+        L3 = [dist3(a3,b3), dist3(b3,c3), dist3(c3,a3)]
+
+        ua = avg_uv(orig_uvs.get(in_tri[0], []))
+        ub = avg_uv(orig_uvs.get(in_tri[1], []))
+        uc = avg_uv(orig_uvs.get(in_tri[2], []))
+
+        if ua is None or ub is None or uc is None:
             triangle_area_ratio[i] = 1.0
             triangle_log_ratio[i] = 0.0
+            continue
+
+        def dist2(p,q):
+            return _math.hypot(p[0]-q[0], p[1]-q[1])
+        L2 = [dist2(ua,ub), dist2(ub,uc), dist2(uc,ua)]
+
+        if any(l <= EPS for l in L2):
+            triangle_area_ratio[i] = 1.0
+            triangle_log_ratio[i] = 0.0
+            degenerate_uv_count += 1
+            continue
+
+        # per-edge 3D/2D ratios
+        ratios = [ (L3[j] / L2[j]) for j in range(3) ]
+        # triangle stress metric: ratio_spread = max/min
+        ratio_min = max(min(ratios), 1e-12)
+        ratio_max = max(ratios)
+        ratio_spread = ratio_max / ratio_min if ratio_min>0 else ratio_max
+        # store as "area_ratio" variable used elsewhere (and log)
+        triangle_area_ratio[i] = min(ratio_spread, 1e6)
+        triangle_log_ratio[i] = _math.log(triangle_area_ratio[i] + EPS)
 
     if 'degenerate_uv_count' in locals() and degenerate_uv_count:
         print(f"Warning: {degenerate_uv_count} degenerate UV triangles ignored for stress.")
-
+    if 'multi_map_count' in locals() and multi_map_count:
+        print(f"Info: {multi_map_count} input triangles map to multiple atlas output triangles (aggregated).")
+    
     else:
         print("Atlas UV output unavailable; stress-based rules will use defaults.")
 
