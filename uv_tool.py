@@ -9,6 +9,9 @@ bl_info = {
 }
 
 import json
+import urllib.request
+import urllib.error
+import re
 
 import bpy
 import os
@@ -20,6 +23,14 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
     bl_label = "Unwrap My Mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
+    def _sanitize_secret(self, text):
+        if text is None:
+            return ""
+        cleaned = str(text).strip().strip('"').strip("'")
+        cleaned = cleaned.replace("\r", "").replace("\n", "")
+        cleaned = ''.join(ch for ch in cleaned if ch.isprintable())
+        return cleaned
+
     
     def export_mesh_data_for_llm(self, obj, temp_dir):
         import bmesh
@@ -30,8 +41,10 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
 
         uv_layer = bm.loops.layers.uv.active
         if uv_layer is None:
+            bm.free()
+            bpy.ops.object.mode_set(mode='OBJECT')
             self.report({'ERROR'}, "No UV layer found!")
-            return
+            return None
 
         mesh_info = {
             "object_name": obj.name,
@@ -86,6 +99,103 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
             
         print(f"Exported rich data to JSON.")
         return json_path
+
+
+
+
+    def request_ai_seams(self, context, mesh_json_path, prompt, temp_dir):
+        scene = context.scene
+        endpoint = (scene.myuv_ai_endpoint or "").strip()
+        model = (scene.myuv_ai_model or "").strip()
+        api_key = self._sanitize_secret(scene.myuv_ai_api_key)
+        ai_project = (scene.myuv_ai_project or "").strip()
+        ai_org = (scene.myuv_ai_organization or "").strip()
+        timeout = max(5, int(scene.myuv_ai_timeout))
+
+        if not endpoint or not model:
+            return False, "AI endpoint/model missing."
+        requires_key = endpoint.lower().startswith("https://")
+        if requires_key and not api_key:
+            return False, "API key missing."
+
+        try:
+            with open(mesh_json_path, 'r', encoding='utf-8') as mesh_file:
+                mesh_payload = mesh_file.read()
+        except OSError as exc:
+            return False, f"Could not read export_data.json: {exc}"
+
+        request_body = {
+            "model": model,
+            "temperature": 0.1,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You output only a valid JSON array of integer edge indices for seams.",
+                },
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n\nMesh JSON:\n{mesh_payload}",
+                },
+            ],
+        }
+
+        body_bytes = json.dumps(request_body).encode('utf-8')
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        if ai_project:
+            headers["OpenAI-Project"] = ai_project
+        if ai_org:
+            headers["OpenAI-Organization"] = ai_org
+
+        try:
+            req = urllib.request.Request(endpoint, data=body_bytes, headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                response_data = response.read().decode('utf-8')
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode('utf-8', errors='ignore')
+            debug_path = os.path.join(temp_dir, "ai_error_response.txt")
+            try:
+                with open(debug_path, 'w', encoding='utf-8') as debug_file:
+                    debug_file.write(error_body)
+            except OSError:
+                pass
+            return False, f"HTTP {exc.code}. Details saved to {debug_path}"
+        except Exception as exc:
+            return False, f"Request failed: {exc}"
+
+        try:
+            parsed = json.loads(response_data)
+            raw_content = parsed["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, json.JSONDecodeError, TypeError):
+            return False, "Invalid LLM response format."
+
+        if raw_content.startswith("```"):
+            raw_content = raw_content.split("\n", 1)[-1]
+        if raw_content.endswith("```"):
+            raw_content = raw_content.rsplit("\n", 1)[0]
+
+        array_match = re.search(r"\[[\s\d,\-]+\]", raw_content)
+        if array_match:
+            raw_content = array_match.group(0)
+
+        try:
+            seam_values = json.loads(raw_content)
+            if not isinstance(seam_values, list):
+                return False, "LLM output was not a JSON array."
+            seam_indices = []
+            for value in seam_values:
+                seam_indices.append(int(value))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return False, "Could not parse seam index array from LLM output."
+
+        out_path = os.path.join(temp_dir, "import_seams.json")
+        with open(out_path, 'w', encoding='utf-8') as seam_file:
+            json.dump(sorted(set(seam_indices)), seam_file)
+
+        return True, f"Saved AI seams to {out_path}"
 
 
 
@@ -264,7 +374,9 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
 
         self.report({'INFO'}, "Smart UVs and Capturing views...")
         self.capture_model_views(obj, temp_dir)
-        self.export_mesh_data_for_llm(obj, temp_dir)
+        mesh_json_path = self.export_mesh_data_for_llm(obj, temp_dir)
+        if mesh_json_path is None:
+            return {'CANCELLED'}
         
         # Output standard prompt
         prompt = """Analyze the attached 3D mesh data (export_data.json) and orthogonal rendered views. 
@@ -279,6 +391,13 @@ Example format:
         prompt_path = os.path.join(temp_dir, "prompt.txt")
         with open(prompt_path, 'w') as f:
             f.write(prompt)
+
+        if context.scene.myuv_auto_call_ai:
+            ok, message = self.request_ai_seams(context, mesh_json_path, prompt, temp_dir)
+            if ok:
+                self.report({'INFO'}, message)
+            else:
+                self.report({'WARNING'}, f"AI call failed: {message}. Manual files are still ready.")
 
         self.report({'INFO'}, f"Draft ready. Files saved to {temp_dir}")
         return {'FINISHED'}
@@ -347,6 +466,14 @@ class VIEW3D_PT_MyUVPanel(bpy.types.Panel):
         layout = self.layout
         layout.operator(MESH_OT_MyCustomUnwrapper.bl_idname)
         layout.operator(MESH_OT_ImportSeams.bl_idname)
+        layout.separator()
+        layout.prop(context.scene, "myuv_auto_call_ai")
+        layout.prop(context.scene, "myuv_ai_endpoint")
+        layout.prop(context.scene, "myuv_ai_model")
+        layout.prop(context.scene, "myuv_ai_api_key")
+        layout.prop(context.scene, "myuv_ai_project")
+        layout.prop(context.scene, "myuv_ai_organization")
+        layout.prop(context.scene, "myuv_ai_timeout")
 
 classes = (
     MESH_OT_MyCustomUnwrapper,
@@ -357,10 +484,55 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.myuv_auto_call_ai = bpy.props.BoolProperty(
+        name="Auto call AI",
+        description="Call LLM API after export to generate import_seams.json automatically",
+        default=False,
+    )
+    bpy.types.Scene.myuv_ai_endpoint = bpy.props.StringProperty(
+        name="AI Endpoint",
+        description="OpenAI-compatible chat completions endpoint",
+        default="https://api.openai.com/v1/chat/completions",
+    )
+    bpy.types.Scene.myuv_ai_model = bpy.props.StringProperty(
+        name="Model",
+        description="Model name for your provider",
+        default="gpt-4o-mini",
+    )
+    bpy.types.Scene.myuv_ai_api_key = bpy.props.StringProperty(
+        name="API Key",
+        description="Bearer API key for your provider",
+        subtype='PASSWORD',
+        default="",
+    )
+    bpy.types.Scene.myuv_ai_project = bpy.props.StringProperty(
+        name="OpenAI Project (optional)",
+        description="Optional OpenAI project id (for project-scoped keys)",
+        default="",
+    )
+    bpy.types.Scene.myuv_ai_organization = bpy.props.StringProperty(
+        name="OpenAI Org (optional)",
+        description="Optional OpenAI organization id",
+        default="",
+    )
+    bpy.types.Scene.myuv_ai_timeout = bpy.props.IntProperty(
+        name="Timeout (sec)",
+        description="LLM request timeout in seconds",
+        default=60,
+        min=5,
+        max=300,
+    )
     print("Addon registered successfully!")
 
 
 def unregister():
+    del bpy.types.Scene.myuv_ai_timeout
+    del bpy.types.Scene.myuv_ai_organization
+    del bpy.types.Scene.myuv_ai_project
+    del bpy.types.Scene.myuv_ai_api_key
+    del bpy.types.Scene.myuv_ai_model
+    del bpy.types.Scene.myuv_ai_endpoint
+    del bpy.types.Scene.myuv_auto_call_ai
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     print("Addon unregistered successfully!")
