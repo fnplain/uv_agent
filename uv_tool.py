@@ -333,9 +333,10 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
 
         print("UV Agent export folder:", temp_dir)
 
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.01)
-        bpy.ops.object.mode_set(mode='OBJECT')
+        if not context.scene.myuv_auto_call_ai:
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.01)
+            bpy.ops.object.mode_set(mode='OBJECT')
 
         uv_path = os.path.join(temp_dir, "uv_layout.png")
 

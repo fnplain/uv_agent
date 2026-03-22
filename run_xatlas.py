@@ -10,6 +10,8 @@ import os
 import sys
 from collections import defaultdict, Counter
 
+ANGLE_THRESHOLD_DEG = 45.0  # treat edges with dihedral angle above this as seams, even if xatlas put them in same chart
+
 try:
     import xatlas
 except Exception as exc:
@@ -175,6 +177,15 @@ def derive_seams(export, triangles, tri_to_face, tri_chart_ids):
         edge_idx = e['index']
         key = tuple(sorted((int(e['verts'][0]), int(e['verts'][1]))))
         tris = edge_to_tris.get(key, [])
+        # force seam when dihedral angle is large (boundary-like), even if xatlas put them in same chart
+        try: 
+            edge_angle = float(e.get('angle', 0.0))
+        except Exception:
+            edge_angle = 0.0
+        if ANGLE_THRESHOLD_DEG and edge_angle >= float(ANGLE_THRESHOLD_DEG):
+            seams.append(edge_idx)
+            continue
+
         if len(tris) == 0:
             # no triangle used this edge (degenerate case) -> treat as seam
             seams.append(edge_idx)
