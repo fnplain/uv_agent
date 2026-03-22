@@ -100,8 +100,19 @@ def run_xatlas_and_get_chart_per_triangle(vertices, triangles):
         try:
             atlas_vmapping, atlas_indices, atlas_uvs = atlas[0]
         except Exception:
-            atlas_vmapping, atlas_indices, atlas_uvs = None, None, None
 
+            try:
+                vmapping, out_indices, uvs = xatlas.parametrize(vertices, triangles)
+                atlas_vmapping = list(map(int, vmapping))
+                atlas_indices = [tuple(map(int, t)) for t in out_indices.reshape(-1,3)] if hasattr(out_indices, 'reshape') else out_indices
+                atlas_uvs = [tuple(map(float, u)) for u in uvs]
+            except Exception:
+                atlas_vmapping, atlas_indices, atlas_uvs = None, None, None
+
+        if atlas_vmapping is not None:
+            print("Info: atlas UV output available (using atlas or parametrize).")
+        else:
+            print("Info: atlas UV output not available from Atlas or parametrize.")
 
         return tri_chart_ids, (atlas_vmapping, atlas_indices, atlas_uvs)
     except Exception:
