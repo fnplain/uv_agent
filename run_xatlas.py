@@ -11,8 +11,8 @@ import sys
 from collections import defaultdict, Counter
 
 ANGLE_THRESHOLD_DEG = 70.0  # treat edges with dihedral angle above this as seams, even if xatlas put them in same chart
-STRESS_THRESHOLD = 10.0
-LOG_STRESS_DIFF = 2.0
+STRESS_THRESHOLD = 2000
+LOG_STRESS_DIFF = 4.0
 EDGE_STRESS_MIN = 2.0
 EPS = 1e-9
 CHART_MIN_TRIS = 3
@@ -401,14 +401,9 @@ def main():
 
     for i, in_tri in enumerate(triangles):
 
-
         a3 = vertices[in_tri[0]]; 
         b3 = vertices[in_tri[1]];
         c3 = vertices[in_tri[2]];
-
-        def dist3(p,q):
-            return _math.sqrt((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2)
-        L3 = [dist3(a3,b3), dist3(b3,c3), dist3(c3,a3)]
 
         ua = avg_uv(orig_uvs.get(in_tri[0], []))
         ub = avg_uv(orig_uvs.get(in_tri[1], []))
@@ -419,25 +414,65 @@ def main():
             triangle_log_ratio[i] = 0.0
             continue
 
-        def dist2(p,q):
-            return _math.hypot(p[0]-q[0], p[1]-q[1])
-        L2 = [dist2(ua,ub), dist2(ub,uc), dist2(uc,ua)]
 
-        if any(l <= EPS for l in L2):
+        # Build 2x2 UV matrix B = [ (ub-ua)  (uc-ua) ] as columns
+        b00 = ub[0] - ua[0]; b10 = ub[1] - ua[1]
+        b01 = uc[0] - ua[0]; b11 = uc[1] - ua[1]
+        detB = b00 * b11 - b01 * b10
+        if abs(detB) <= EPS:
             triangle_area_ratio[i] = 1.0
             triangle_log_ratio[i] = 0.0
             degenerate_uv_count += 1
             continue
+        invDet = 1.0 / detB
+        invB00 =  b11 * invDet
+        invB01 = -b01 * invDet
+        invB10 = -b10 * invDet
+        invB11 =  b00 * invDet
 
-        # per-edge 3D/2D ratios
-        ratios = [ (L3[j] / L2[j]) for j in range(3) ]
-        # triangle stress metric: ratio_spread = max/min
-        ratio_min = max(min(ratios), 1e-12)
-        ratio_max = max(ratios)
-        ratio_spread = ratio_max / ratio_min if ratio_min>0 else ratio_max
-        # store as "area_ratio" variable used elsewhere (and log)
-        triangle_area_ratio[i] = min(ratio_spread, 1e6)
-        triangle_log_ratio[i] = _math.log(triangle_area_ratio[i] + EPS)
+
+        a0x = b3[0] - a3[0]; a0y = b3[1] - a3[1]; a0z = b3[2] - a3[2]
+        a1x = c3[0] - a3[0]; a1y = c3[1] - a3[1]; a1z = c3[2] - a3[2]
+
+
+        # J = A * invB  (3x2)
+        J00 = a0x * invB00 + a1x * invB10
+        J10 = a0y * invB00 + a1y * invB10
+        J20 = a0z * invB00 + a1z * invB10
+
+        J01 = a0x * invB01 + a1x * invB11
+        J11 = a0y * invB01 + a1y * invB11
+        J21 = a0z * invB01 + a1z * invB11
+
+        # 2x2 symmetric C = J^T * J
+        C00 = J00*J00 + J10*J10 + J20*J20
+        C01 = J00*J01 + J10*J11 + J20*J21
+        C11 = J01*J01 + J11*J11 + J21*J21
+
+
+        trace = C00 + C11
+        disc = trace*trace - 4.0*(C00*C11 - C01*C01)
+        disc = max(disc, 0.0)
+        ev_high = 0.5*(trace + _math.sqrt(disc))
+        ev_low  = 0.5*(trace - _math.sqrt(disc))
+
+
+        s_high = _math.sqrt(max(ev_high, EPS))
+        s_low  = _math.sqrt(max(ev_low, EPS))
+
+
+
+        if s_low <= EPS:
+            ratio = 1.0
+        else:
+            ratio = s_high / s_low
+
+
+        ratio = min(ratio, 1e6)
+
+        triangle_area_ratio[i] = ratio
+        triangle_log_ratio[i] = _math.log(ratio + EPS)
+
 
     if atlas_vmapping is not None and atlas_indices is not None and atlas_uvs is not None:
         if 'degenerate_uv_count' in locals() and degenerate_uv_count:
