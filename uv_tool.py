@@ -93,6 +93,16 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
         bm.free()
         bpy.ops.object.mode_set(mode='OBJECT')
 
+        mesh = obj.data
+        mesh.calc_loop_triangles()
+        triangles = []
+        for tri in mesh.loop_triangles:
+            triangles.append({
+                "verts": [int(v) for v in tri.vertices],
+                "orig_face": int(tri.polygon_index)
+            })
+        mesh_info["triangles"] = triangles
+
         json_path = os.path.join(temp_dir, "export_data.json")
         with open(json_path, 'w') as f:
             json.dump(mesh_info, f)
@@ -316,6 +326,8 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
         temp_dir = os.path.join(blend_dir, "uv_agent_shots")
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir, exist_ok=True)
+
+        print("UV Agent export folder:", temp_dir)
 
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.01)
