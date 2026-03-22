@@ -262,15 +262,18 @@ def derive_seams(export, triangles, tri_to_face, tri_chart_ids,
 
     # Build edge -> triangle index map from triangulated triangles
     edge_to_tris = {}
+    edge_idx_to_verts = {}
     for ti, tri in enumerate(triangles):
         verts = tri
         edges = [(verts[0], verts[1]), (verts[1], verts[2]), (verts[2], verts[0])]
         for a,b in edges:
             key = tuple(sorted((int(a), int(b))))
             edge_to_tris.setdefault(key, []).append(ti)
+    for e in export.get('edges', []):
+        edge_idx_to_verts[int(e['index'])] = (int(e['verts'][0]), int(e['verts'][1]))
 
     seams = []
-    stats = {"angle":0, "chart":0, "chart_ignored":0, "stress":0, "boundary":0, "degenerate":0}
+    stats = {"angle":0, "chart":0, "chart_ignored":0, "stress":0, "boundary":0, "degenerate":0, "post_removed":0}
 
     for e in export['edges']:
         edge_idx = e['index']
@@ -299,7 +302,8 @@ def derive_seams(export, triangles, tri_to_face, tri_chart_ids,
             # ignore tiny charts (likely fragmentation noise)
             if chart_sizes is not None:
                 sizes = [chart_sizes.get(c, 0) for c in charts]
-                if max(sizes) < CHART_MIN_TRIS:
+                small = min(sizes) if sizes else 0
+                if small < CHART_MIN_TRIS:
                     stats["chart_ignored"] += 1
                     continue
             seams.append(edge_idx); stats["chart"] += 1; continue
@@ -326,6 +330,28 @@ def derive_seams(export, triangles, tri_to_face, tri_chart_ids,
         # 5) boundary-like single-triangle edge -> seam
         if len(tris) == 1:
             seams.append(edge_idx); stats["boundary"] += 1
+
+    seams_set = set(seams)
+    vert_seam_degree = defaultdict(int)
+    for s in seams_set:
+        verts = edge_idx_to_verts.get(s)
+        if verts:
+            vert_seam_degree[verts[0]] += 1
+            vert_seam_degree[verts[1]] += 1
+
+    removed = []
+    for s in list(seams_set):
+        verts = edge_idx_to_verts.get(s)
+        if not verts:
+            continue
+        a,b = verts
+        if vert_seam_degree.get(a,0) == 1 and vert_seam_degree.get(b,0) == 1:
+            seams_set.remove(s)
+            stats["post_removed"] += 1
+            # decrement degrees (keeps counts consistent)
+            vert_seam_degree[a] -= 1
+            vert_seam_degree[b] -= 1
+
 
     seams = sorted(set(seams))
     print("Seam rule counts:", stats)
