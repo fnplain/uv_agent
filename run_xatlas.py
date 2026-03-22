@@ -122,41 +122,72 @@ def run_xatlas_and_get_chart_per_triangle(vertices, triangles):
             print("xatlas fallback failed:", exc)
             return None
 
+# def derive_seams(export, triangles, tri_to_face, tri_chart_ids):
+#     # Map triangle chart id -> original face index groups
+#     face_to_tri_charts = defaultdict(list)
+#     for tri_idx, face_idx in enumerate(tri_to_face):
+#         face_to_tri_charts[face_idx].append(tri_chart_ids[tri_idx])
+#     # Representative face chart: majority of its triangles' charts
+#     face_chart = {}
+#     for face_idx, charts in face_to_tri_charts.items():
+#         face_chart[face_idx] = Counter(charts).most_common(1)[0][0]
+#     # For each original edge from export['edges'], check adjacent faces
+#     seams = []
+#     for e in export['edges']:
+#         edge_idx = e['index']
+#         # Need to find adjacent faces that contain this edge (two faces or 1 if boundary)
+#         v0, v1 = e['verts']
+#         adjacent_faces = []
+#         for f in export['faces']:
+#             verts = f['verts']
+#             # if both vertices present in face, consider it adjacent
+#             if v0 in verts and v1 in verts:
+#                 adjacent_faces.append(f['index'])
+#         if len(adjacent_faces) == 2:
+#             fa, fb = adjacent_faces
+#             ca = face_chart.get(fa, None)
+#             cb = face_chart.get(fb, None)
+#             if ca is None or cb is None:
+#                 continue
+#             if ca != cb:
+#                 seams.append(edge_idx)
+#         else:
+#             # boundary edge: usually set seam
+#             seams.append(edge_idx)
+#     # dedupe and sort
+#     seams = sorted(set(seams))
+#     return seams
+
+
 def derive_seams(export, triangles, tri_to_face, tri_chart_ids):
-    # Map triangle chart id -> original face index groups
-    face_to_tri_charts = defaultdict(list)
-    for tri_idx, face_idx in enumerate(tri_to_face):
-        face_to_tri_charts[face_idx].append(tri_chart_ids[tri_idx])
-    # Representative face chart: majority of its triangles' charts
-    face_chart = {}
-    for face_idx, charts in face_to_tri_charts.items():
-        face_chart[face_idx] = Counter(charts).most_common(1)[0][0]
-    # For each original edge from export['edges'], check adjacent faces
+    # Build edge -> triangle index map from triangulated triangles
+    edge_to_tris = {}
+    for ti, tri in enumerate(triangles):
+        verts = tri
+        edges = [(verts[0], verts[1]), (verts[1], verts[2]), (verts[2], verts[0])]
+        for a,b in edges:
+            key = tuple(sorted((int(a), int(b))))
+            edge_to_tris.setdefault(key, []).append(ti)
+
     seams = []
+    # For each original exported edge, find triangles that contain that edge (by vertex pair)
     for e in export['edges']:
         edge_idx = e['index']
-        # Need to find adjacent faces that contain this edge (two faces or 1 if boundary)
-        v0, v1 = e['verts']
-        adjacent_faces = []
-        for f in export['faces']:
-            verts = f['verts']
-            # if both vertices present in face, consider it adjacent
-            if v0 in verts and v1 in verts:
-                adjacent_faces.append(f['index'])
-        if len(adjacent_faces) == 2:
-            fa, fb = adjacent_faces
-            ca = face_chart.get(fa, None)
-            cb = face_chart.get(fb, None)
-            if ca is None or cb is None:
-                continue
-            if ca != cb:
-                seams.append(edge_idx)
-        else:
-            # boundary edge: usually set seam
+        key = tuple(sorted((int(e['verts'][0]), int(e['verts'][1]))))
+        tris = edge_to_tris.get(key, [])
+        if len(tris) == 0:
+            # no triangle used this edge (degenerate case) -> treat as seam
             seams.append(edge_idx)
-    # dedupe and sort
-    seams = sorted(set(seams))
-    return seams
+            continue
+        # collect chart ids seen on triangles touching this edge
+        charts = set(tri_chart_ids[t] for t in tris if 0 <= t < len(tri_chart_ids))
+        if len(charts) > 1:
+            seams.append(edge_idx)
+        else:
+            # boundary-like (only one triangle) -> often seam desired
+            if len(tris) == 1:
+                seams.append(edge_idx)
+    return sorted(set(seams))
 
 def main():
     if len(sys.argv) < 2:

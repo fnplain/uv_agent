@@ -65,10 +65,14 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
 
        
         for e in bm.edges:
-            angle = 0
-            if not e.is_boundary:
-                angle = math.degrees(e.calc_face_angle())
-                
+            # safe: compute angle only when exactly two faces reference the edge
+            angle = 0.0
+            lf = e.link_faces
+            if len(lf) == 2:
+                try:
+                    angle = math.degrees(e.calc_face_angle())
+                except Exception:
+                    angle = 0.0
             mesh_info["edges"].append({
                 "index": e.index,
                 "verts": [v.index for v in e.verts],
@@ -384,8 +388,8 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
         # bpy.ops.uv.unwrap(method='ANGLE_BASED', margin=0.01)
         # old method end 
 
-        self.report({'INFO'}, "Smart UVs and Capturing views...")
-        self.capture_model_views(obj, temp_dir)
+        # self.report({'INFO'}, "Smart UVs and Capturing views...")
+        # self.capture_model_views(obj, temp_dir)
         mesh_json_path = self.export_mesh_data_for_llm(obj, temp_dir)
         if mesh_json_path is None:
             return {'CANCELLED'}
