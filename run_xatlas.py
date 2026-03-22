@@ -84,16 +84,6 @@ def run_xatlas_and_get_chart_per_triangle(vertices, triangles):
         atlas = xatlas.Atlas()
         atlas.add_mesh(vertices, triangles)
         atlas.generate()
-        # atlas.get_mesh_vertex_assignement(mesh_idx) -> (atlas_index_arr, chart_index_arr)
-        atlas_index_arr, chart_index_arr = atlas.get_mesh_vertex_assignement(0)
-        # chart_index_arr length == len(vertices) (assignment per original vertex)
-        # For each input triangle (vertex indices), get chart id by majority of its vertices
-        tri_chart_ids = []
-        for tri in triangles:
-            charts = [chart_index_arr[v] for v in tri]
-            # choose majority, else first
-            c = Counter(charts).most_common(1)[0][0]
-            tri_chart_ids.append(int(c))
 
         atlas_vmapping = atlas_indices = atlas_uvs = None
 
@@ -102,60 +92,118 @@ def run_xatlas_and_get_chart_per_triangle(vertices, triangles):
         except Exception:
 
             try:
-                vmapping, out_indices, uvs = xatlas.parametrize(vertices, triangles)
-                atlas_vmapping = list(map(int, vmapping))
-                atlas_indices = [tuple(map(int, t)) for t in out_indices.reshape(-1,3)] if hasattr(out_indices, 'reshape') else out_indices
-                atlas_uvs = [tuple(map(float, u)) for u in uvs]
+                atlas_vmapping, atlas_indices, atlas_uvs = xatlas.parametrize(vertices, triangles)
             except Exception:
                 atlas_vmapping, atlas_indices, atlas_uvs = None, None, None
 
         if atlas_vmapping is not None:
             print("Info: atlas UV output available (using atlas or parametrize).")
         else:
-            print("Info: atlas UV output not available from Atlas or parametrize.")
+            atlas_vmapping = list(map(int, atlas_vmapping))
+            atlas_indices = [tuple(map(int, t)) for t in atlas_indices.reshape(-1,3)] if hasattr(atlas_indices, 'reshape') else list(map(tuple, atlas_indices))
+            atlas_uvs = [tuple(map(float, u)) for u in atlas_uvs]
 
-        return tri_chart_ids, (atlas_vmapping, atlas_indices, atlas_uvs)
-    except Exception:
-        # Fallback to high-level parametrize helper
-        try:
-
-            vmapping, out_indices, uvs = xatlas.parametrize(vertices, triangles)
-            vmapping = list(map(int, vmapping))
-            out_indices = [tuple(map(int, t)) for t in out_indices.reshape(-1,3)] if hasattr(out_indices, 'reshape') else out_indices
-            uvs = [tuple(map(float, u)) for u in uvs]
-
+        if atlas_vmapping is not None and atlas_indices is not None:
             vm_to_tri = defaultdict(list)
-            for ti, tri in enumerate(out_indices):
+            for ti, tri in enumerate(atlas_indices):
                 for v in tri:
-                    vm_to_tri[v].append(ti)
-            # build adjacency and flood fill for components
-            adj = [[] for _ in range(len(out_indices))]
-            for tri_indices in vm_to_tri.values():
-                for i in tri_indices:
-                    for j in tri_indices:
+                    vm_to_tri[int(v)].append(ti)
+            adj = [[] for _ in range(len(atlas_indices))]
+            for tri_list in vm_to_tri.values():
+                for i in tri_list:
+                    for j in tri_list:
                         if i != j:
                             adj[i].append(j)
-            # flood fill
-            seen = [False]*len(out_indices)
-            tri_chart_ids_out = [-1]*len(out_indices)
+            seen = [False]*len(atlas_indices)
+            out_tri_chart = [-1]*len(atlas_indices)
             cur = 0
-            for i in range(len(out_indices)):
+            for i in range(len(atlas_indices)):
                 if seen[i]:
                     continue
-                stack=[i]; seen[i]=True
+                stack = [i]; seen[i] = True
                 while stack:
                     a = stack.pop()
-                    tri_chart_ids_out[a]=cur
+                    out_tri_chart[a] = cur
                     for b in adj[a]:
                         if not seen[b]:
-                            seen[b]=True
+                            seen[b] = True
                             stack.append(b)
                 cur += 1
 
-            tri_chart_ids = tri_chart_ids_out[:len(triangles)] if len(tri_chart_ids_out) >= len(triangles) else [0]*len(triangles)
-            return tri_chart_ids, (vmapping, out_indices, uvs)
+            # Map output-triangles back to input triangles by original vertex indices
+            mapping = defaultdict(list)
+            for out_ti, out_tri in enumerate(atlas_indices):
+                orig_triple = tuple(int(atlas_vmapping[idx]) for idx in out_tri)
+                key = tuple(sorted(orig_triple))
+                mapping[key].append(out_ti)
+
+            # For each input triangle choose the majority chart among its mapped output triangles
+            tri_chart_ids = []
+            for tri in triangles:
+                key = tuple(sorted(tri))
+                out_tris = mapping.get(key, [])
+                if out_tris:
+                    c = Counter(out_tri_chart[t] for t in out_tris).most_common(1)[0][0]
+                    tri_chart_ids.append(int(c))
+                else:
+                    tri_chart_ids.append(0)
+
+        return tri_chart_ids, (atlas_vmapping, atlas_indices, atlas_uvs)
+    except Exception:
+        print("Atlas() path failed:", exc)
+
+        # Fallback to high-level parametrize helper
+    try:
+        vmapping, out_indices, uvs = xatlas.parametrize(vertices, triangles)
+        vmapping = list(map(int, vmapping))
+        out_indices = [tuple(map(int, t)) for t in out_indices.reshape(-1,3)] if hasattr(out_indices, 'reshape') else list(map(tuple, out_indices))
+        uvs = [tuple(map(float, u)) for u in uvs]
+
+        vm_to_tri = defaultdict(list)
+        for ti, tri in enumerate(out_indices):
+            for v in tri:
+                vm_to_tri[v].append(ti)
+        adj = [[] for _ in range(len(out_indices))]
+        for tri_list in vm_to_tri.values():
+            for i in tri_list:
+                for j in tri_list:
+                    if i != j:
+                        adj[i].append(j)
+        seen = [False]*len(out_indices)
+        out_tri_chart = [-1]*len(out_indices)
+        cur = 0
+        for i in range(len(out_indices)):
+            if seen[i]:
+                continue
+            stack=[i]; seen[i]=True
+            while stack:
+                a = stack.pop()
+                out_tri_chart[a]=cur
+                for b in adj[a]:
+                    if not seen[b]:
+                        seen[b]=True
+                        stack.append(b)
+            cur += 1
+
+        mapping = defaultdict(list)
+        for out_ti, out_tri in enumerate(out_indices):
+            orig_triple = tuple(int(vmapping[idx]) for idx in out_tri)
+            key = tuple(sorted(orig_triple))
+            mapping[key].append(out_ti)
+
+        tri_chart_ids = []
+        for tri in triangles:
+            key = tuple(sorted(tri))
+            out_tris = mapping.get(key, [])
+            if out_tris:
+                c = Counter(out_tri_chart[t] for t in out_tris).most_common(1)[0][0]
+                tri_chart_ids.append(int(c))
+            else:
+                tri_chart_ids.append(0)
+
+        return tri_chart_ids, (vmapping, out_indices, uvs)
         
-        except Exception as exc:
+    except Exception as exc:
             print("xatlas fallback failed:", exc)
             return None, (None, None, None)
 
@@ -353,11 +401,11 @@ def main():
         triangle_area_ratio[i] = min(ratio_spread, 1e6)
         triangle_log_ratio[i] = _math.log(triangle_area_ratio[i] + EPS)
 
-    if 'degenerate_uv_count' in locals() and degenerate_uv_count:
-        print(f"Warning: {degenerate_uv_count} degenerate UV triangles ignored for stress.")
-    if 'multi_map_count' in locals() and multi_map_count:
-        print(f"Info: {multi_map_count} input triangles map to multiple atlas output triangles (aggregated).")
-    
+    if atlas_vmapping is not None and atlas_indices is not None and atlas_uvs is not None:
+        if 'degenerate_uv_count' in locals() and degenerate_uv_count:
+            print(f"Warning: {degenerate_uv_count} degenerate UV triangles ignored for stress.")
+        if 'multi_map_count' in locals() and multi_map_count:
+            print(f"Info: {multi_map_count} input triangles map to multiple atlas output triangles (aggregated).")
     else:
         print("Atlas UV output unavailable; stress-based rules will use defaults.")
 
