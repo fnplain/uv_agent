@@ -11,10 +11,13 @@ import sys
 from collections import defaultdict, Counter
 
 ANGLE_THRESHOLD_DEG = 70.0  # treat edges with dihedral angle above this as seams, even if xatlas put them in same chart
-STRESS_THRESHOLD = 5.0
-LOG_STRESS_DIFF = 1.5
-EDGE_STRESS_MIN = 1.5
+STRESS_THRESHOLD = 10.0
+LOG_STRESS_DIFF = 2.0
+EDGE_STRESS_MIN = 2.0
 EPS = 1e-9
+CHART_MIN_TRIS = 3
+DIAGNOSTIC_TOP_N = 12
+
 
 try:
     import xatlas
@@ -250,7 +253,7 @@ def run_xatlas_and_get_chart_per_triangle(vertices, triangles):
 
 
 def derive_seams(export, triangles, tri_to_face, tri_chart_ids,
-                 triangle_area_ratio=None, triangle_log_ratio=None):
+                 triangle_area_ratio=None, triangle_log_ratio=None, chart_sizes=None):
 
     if triangle_area_ratio is None:
         triangle_area_ratio = [1.0]*len(triangles)
@@ -267,7 +270,7 @@ def derive_seams(export, triangles, tri_to_face, tri_chart_ids,
             edge_to_tris.setdefault(key, []).append(ti)
 
     seams = []
-    stats = {"angle":0, "chart":0, "stress":0, "boundary":0, "degenerate":0}
+    stats = {"angle":0, "chart":0, "chart_ignored":0, "stress":0, "boundary":0, "degenerate":0}
 
     for e in export['edges']:
         edge_idx = e['index']
@@ -293,6 +296,12 @@ def derive_seams(export, triangles, tri_to_face, tri_chart_ids,
         # 3) chart boundary rule
         charts = set(tri_chart_ids[t] for t in tris if 0 <= t < len(tri_chart_ids))
         if len(charts) > 1:
+            # ignore tiny charts (likely fragmentation noise)
+            if chart_sizes is not None:
+                sizes = [chart_sizes.get(c, 0) for c in charts]
+                if max(sizes) < CHART_MIN_TRIS:
+                    stats["chart_ignored"] += 1
+                    continue
             seams.append(edge_idx); stats["chart"] += 1; continue
 
         # 4) stress-based rule (per-edge relative test)
@@ -335,6 +344,9 @@ def main():
         print("Failed to compute charts with xatlas.")
         sys.exit(2)
 
+    chart_sizes = Counter(tri_chart_ids)
+    print("Chart count:", len(chart_sizes))
+    print("Chart sizes (top 12):", chart_sizes.most_common(12))
 
         # attempt to compute per-input-triangle area_ratio using atlas output if available
     atlas_vmapping, atlas_indices, atlas_uvs = atlas_out
@@ -410,9 +422,24 @@ def main():
         print("Atlas UV output unavailable; stress-based rules will use defaults.")
 
 
+
+    if 'degenerate_uv_count' in locals() and degenerate_uv_count:
+        print(f"Warning: {degenerate_uv_count} degenerate UV triangles ignored for stress.")
+    if 'multi_map_count' in locals() and multi_map_count:
+        print(f"Info: {multi_map_count} input triangles map to multiple atlas output triangles (aggregated).")
+    if not (atlas_vmapping is not None and atlas_indices is not None and atlas_uvs is not None):
+        print("Atlas UV output unavailable; stress-based rules will use defaults.")
+    
+
+    top = sorted(enumerate(triangle_area_ratio), key=lambda x: x[1], reverse=True)[:DIAGNOSTIC_TOP_N]
+    print("Top stressed triangles (tri_idx, stress, orig_face):")
+    for ti, val in top:
+        face_idx = tri_to_face[ti] if ti < len(tri_to_face) else -1
+        print(f"  {ti}: {val:.3g} (face {face_idx})")
+
     
     seams = derive_seams(export, triangles, tri_to_face, tri_chart_ids,
-                         triangle_area_ratio, triangle_log_ratio)
+                         triangle_area_ratio, triangle_log_ratio, chart_sizes=chart_sizes)
     out_dir = os.path.dirname(json_path)
     out_path = os.path.join(out_dir, "import_seams.json")
     with open(out_path, 'w', encoding='utf-8') as f:
