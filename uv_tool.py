@@ -691,12 +691,15 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         # seam edge indices
         seam_edges_indices = [int(e.index) for e in mesh.edges if getattr(e, "use_seam", False)]
         
+        face_index = [[int(v) for v in poly.vertices] for poly in mesh.polygons]
+        
         
         data = {
             "mesh_metadata": mesh_metadata,
             "geometry": {
                 "vertices": geometry_vertices,
-                "edge_index": edge_index
+                "edge_index": edge_index,
+                "face_index": face_index
             },
             "labels": {
                 "seam_edges_indices": seam_edges_indices
