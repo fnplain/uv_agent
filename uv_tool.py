@@ -313,13 +313,6 @@ class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
         bpy.data.objects.remove(cam, do_unlink=True)
         return out_dir
 
-
-
-
-
-
-
-
     def execute(self, context):
         print("Button was clicked!")
 
@@ -576,6 +569,11 @@ class VIEW3D_PT_MyUVPanel(bpy.types.Panel):
         # layout.prop(context.scene, "myuv_ai_timeout")
 
 
+
+
+
+
+
 class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
     bl_idname = "mesh.export_seamgpt"
     bl_label = "Export SeamGPT Data"
@@ -594,7 +592,8 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         import json
-        import mathutils
+        from mathutils import Vector
+        import math
 
         TARGET = 15360
 
@@ -606,80 +605,154 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         mesh = obj.data
         
 
+        world_verts = [obj.matrix_world @ v.co for v in mesh.vertices]
+        if world_verts:
+            xs = [v.x for v in world_verts]; ys = [v.y for v in world_verts]; zs = [v.z for v in world_verts]
+            original_bounds = [round(max(xs)-min(xs), 6), round(max(ys)-min(ys), 6), round(max(zs)-min(zs), 6)]
+        else:
+            original_bounds = [0.0, 0.0, 0.0]
+        
         mesh_metadata = {
             "name": obj.name,
-            "poly_count": len(mesh.polygons)
+            "poly_count": len(mesh.polygons),
+            "original_bounds": original_bounds,
         }
 
-
-        verts_world = []
+        
+        try:
+            normal_matrix = obj.matrix_world.to_3x3().inverted().transposed()
+        except Exception:
+            normal_matrix = obj.matrix_world.to_3x3()
+        vert_world_pos = []
+        vert_world_norm = []
         for v in mesh.vertices:
-            wc = obj.matrix_world @ v.co
-            verts_world.append([float(wc.x), float(wc.y), float(wc.z)])
+            wp = obj.matrix_world @ v.co
+            vn = normal_matrix @ v.normal
+            if vn.length != 0:
+                vn.normalize()
+            vert_world_pos.append([round(float(wp.x), 6), round(float(wp.y), 6), round(float(wp.z), 6)])
+            vert_world_norm.append([round(float(vn.x), 6), round(float(vn.y), 6), round(float(vn.z), 6)])
 
-
-        edge_midpoints = []
+        neighbors = {i: set() for i in range(len(mesh.vertices))}
         for e in mesh.edges:
-            a = obj.matrix_world @ mesh.vertices[e.vertices[0]].co
-            b = obj.matrix_world @ mesh.vertices[e.vertices[1]].co
-            mid = (a + b) / 2
-            edge_midpoints.append([float(mid.x), float(mid.y), float(mid.z)])
-
-
-
-        def sample_repeat(points, target):
-            if not points:
-                return [[0.0, 0.0, 0.0]] * target
-            n = len(points)
-            if n >= target:
-                step = n / target
-                return [[round(c, 6) for c in points[int(i * step)]] for i in range(target)]
-            res = []
-            i = 0
-            while len(res) < target:
-                p = points[i % n]
-                res.append([round(p[0], 6), round(p[1], 6), round(p[2], 6)])
-                i += 1
-            return res
+            a, b = int(e.vertices[0]), int(e.vertices[1])
+            neighbors[a].add(b); neighbors[b].add(a)
         
-        vertex_points = sample_repeat(verts_world, TARGET)
-        edge_points = sample_repeat(edge_midpoints, TARGET)
         
-        seam_edges = []
-        ordered_list = []
         
-        for e in mesh.edges:
-            if e.use_seam:
-                a = int(e.vertices[0])
-                b = int(e.vertices[1])
-                seam_edges.append((a, b))
-                
-                v1 = obj.matrix_world @ mesh.vertices[a].co
-                v2 = obj.matrix_world @ mesh.vertices[b].co
-                
-                start_coord, end_coord = sorted([list(v1), list(v2)], key=lambda x: (x[1], x[2], x[0]))
-                
-                if (Vector(start_coord) - v1).length < (Vector(start_coord) - v2).length:
-                    start_idx, end_idx = a, b
-                else:
-                    start_idx, end_idx = b, a    
-                ordered_list.append(((start_coord[1], start_coord[2], start_coord[0]), [start_idx, end_idx]))
-                
-        ordered_list.sort(key=lambda x: (x[0][0], x[0][1], x[0][2]))
-        ordered_segments = [pair for _, pair in ordered_list]
+        def avg_neighbor_normal(idx):
+            neigh = neighbors[idx]
+            if not neigh:
+                return None
+            sx = sy = sz = 0.0
+            for j in neigh:
+                nx, ny, nz = vert_world_norm[j]
+                sx += nx; sy += ny; sz += nz
+            n = Vector((sx, sy, sz))
+            if n.length == 0:
+                return None
+            n.normalize()
+            return n
+        
+        
+        geometry_vertices = []
+        for i, pos in enumerate(vert_world_pos):
+            vn = Vector(vert_world_norm[i])
+            ann = avg_neighbor_normal(i)
+            if ann is None:
+                curvature = 0.0
+            else:
+                d = max(-1.0, min(1.0, vn.dot(ann)))
+                curvature = round(max(0.0, 1.0 - d), 6)
+            geometry_vertices.append({
+                "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
+                "normal": [float(vert_world_norm[i][0]), float(vert_world_norm[i][1]), float(vert_world_norm[i][2])],
+                "curvature": float(curvature)
+            })
+        
+        
+        # edge index list
+        edge_index = [[int(e.vertices[0]), int(e.vertices[1])] for e in mesh.edges]
+
+        
+        # seam edge indices
+        seam_edges_indices = [int(e.index) for e in mesh.edges if getattr(e, "use_seam", False)]
         
         
         data = {
             "mesh_metadata": mesh_metadata,
-            "shape_context": {
-                "vertex_points": vertex_points,
-                "edge_points": edge_points
+            "geometry": {
+                "vertices": geometry_vertices,
+                "edge_index": edge_index
             },
-            "labels": { 
-                "seam_edges": seam_edges,
-                "ordered_segments": ordered_segments
+            "labels": {
+                "seam_edges_indices": seam_edges_indices
             }
         }
+        
+        
+        # edge_midpoints = []
+        # for e in mesh.edges:
+        #     a = obj.matrix_world @ mesh.vertices[e.vertices[0]].co
+        #     b = obj.matrix_world @ mesh.vertices[e.vertices[1]].co
+        #     mid = (a + b) / 2
+        #     edge_midpoints.append([float(mid.x), float(mid.y), float(mid.z)])
+
+
+
+        # def sample_repeat(points, target):
+        #     if not points:
+        #         return [[0.0, 0.0, 0.0]] * target
+        #     n = len(points)
+        #     if n >= target:
+        #         step = n / target
+        #         return [[round(c, 6) for c in points[int(i * step)]] for i in range(target)]
+        #     res = []
+        #     i = 0
+        #     while len(res) < target:
+        #         p = points[i % n]
+        #         res.append([round(p[0], 6), round(p[1], 6), round(p[2], 6)])
+        #         i += 1
+        #     return res
+        
+        # vertex_points = sample_repeat(verts_world, TARGET)
+        # edge_points = sample_repeat(edge_midpoints, TARGET)
+        
+        # seam_edges = []
+        # ordered_list = []
+        
+        # for e in mesh.edges:
+        #     if e.use_seam:
+        #         a = int(e.vertices[0])
+        #         b = int(e.vertices[1])
+        #         seam_edges.append((a, b))
+                
+        #         v1 = obj.matrix_world @ mesh.vertices[a].co
+        #         v2 = obj.matrix_world @ mesh.vertices[b].co
+                
+        #         start_coord, end_coord = sorted([list(v1), list(v2)], key=lambda x: (x[1], x[2], x[0]))
+                
+        #         if (Vector(start_coord) - v1).length < (Vector(start_coord) - v2).length:
+        #             start_idx, end_idx = a, b
+        #         else:
+        #             start_idx, end_idx = b, a    
+        #         ordered_list.append(((start_coord[1], start_coord[2], start_coord[0]), [start_idx, end_idx]))
+                
+        # ordered_list.sort(key=lambda x: (x[0][0], x[0][1], x[0][2]))
+        # ordered_segments = [pair for _, pair in ordered_list]
+        
+        
+        # data = {
+        #     "mesh_metadata": mesh_metadata,
+        #     "shape_context": {
+        #         "vertex_points": vertex_points,
+        #         "edge_points": edge_points
+        #     },
+        #     "labels": { 
+        #         "seam_edges": seam_edges,
+        #         "ordered_segments": ordered_segments
+        #     }
+        # }
         
         try:
             with open(self.filepath, 'w', encoding='utf-8') as f:
