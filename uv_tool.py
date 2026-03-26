@@ -726,6 +726,37 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
             edge_dihedral_degrees.append(round(float(ang), 4))
             edge_is_sharp.append(ang >= SHARP_DEG)
         
+        def sample_repeat_with_mask(points, target):
+            # points: list[list[float, float, float]]
+            # returns (padded_points, mask) where mask[i]=1 for real data, 0 for padding
+            if not points:
+                return ([[0.0, 0.0, 0.0]] * target, [0] * target)
+            n = len(points)
+            if n >= target:
+                step = n / target
+                sampled = [[round(c, 4) for c in points[int(i * step)]] for i in range(target)]
+                mask = [1] * target
+                return sampled, mask
+            # n < target: copy original points first, then zero-pad
+            res = [[round(p[0], 4), round(p[1], 4), round(p[2], 4)] for p in points]
+            mask = [1] * len(res)
+            while len(res) < target:
+                res.append([0.0, 0.0, 0.0])
+                mask.append(0)
+            return res, mask
+        
+        verts_world = [[float(v[0]), float(v[1]), float(v[2])] for v in vert_world_pos]
+        edge_midpoints = []
+        for e in mesh.edges:
+            a = obj.matrix_world @ mesh.vertices[e.vertices[0]].co
+            b = obj.matrix_world @ mesh.vertices[e.vertices[1]].co
+            mid = (a + b) / 2
+
+            mn = (mid - center) / scale
+            edge_midpoints.append([round(float(mn.x), 4), round(float(mn.y), 4), round(float(mn.z), 4)])
+            
+        vertex_points, vertex_mask = sample_repeat_with_mask(verts_world, TARGET)
+        edge_points, edge_mask = sample_repeat_with_mask(edge_midpoints, TARGET)
         
         data = {
             "mesh_metadata": mesh_metadata,
@@ -738,7 +769,12 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
             },
             "labels": {
                 "seam_edges_indices": seam_edges_indices
-            }
+            },
+            "shape_context": {
+                "vertex_points": vertex_points,
+                "edge_points": edge_points,
+                "padding_mask": vertex_mask 
+            },
         }
         
         
