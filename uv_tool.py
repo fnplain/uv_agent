@@ -732,9 +732,9 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
             "geometry": {
                 "vertices": geometry_vertices,
                 "edge_index": edge_index,
-                "face_index": face_index,
                 "edge_dihedral_degrees": edge_dihedral_degrees,
-                "edge_is_sharp": edge_is_sharp
+                "edge_is_sharp": edge_is_sharp,
+                "face_index": face_index,
             },
             "labels": {
                 "seam_edges_indices": seam_edges_indices
