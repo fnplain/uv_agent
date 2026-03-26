@@ -693,13 +693,48 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         
         face_index = [[int(v) for v in poly.vertices] for poly in mesh.polygons]
         
+        poly_world_norm = []
+        for poly in mesh.polygons:
+            pn = Vector(poly.normal)
+            wn = normal_matrix @ pn
+            if wn.length != 0:
+                wn.normalize()
+            poly_world_norm.append(wn)
+            
+        vertex_to_polys = {i: set() for i in range(len(mesh.vertices))}
+        for poly in mesh.polygons:
+            for vi in poly.vertices:
+                vertex_to_polys[vi].add(poly.index)
+        
+        
+        edge_dihedral_degrees = []
+        SHARP_DEG = 45.0
+        edge_is_sharp = []
+        for e in mesh.edges:
+            a, b = int(e.vertices[0]), int(e.vertices[1])
+            common = vertex_to_polys[a].intersection(vertex_to_polys[b])
+            if len(common) >= 2:
+                f1, f2 = list(common)[:2]
+                n1 = poly_world_norm[f1]; n2 = poly_world_norm[f2]
+                d = max(-1.0, min(1.0, n1.dot(n2)))
+                ang = math.degrees(math.acos(d))
+            elif len(common) == 1:
+                # boundary edge: treat as maximally sharp
+                ang = 180.0
+            else:
+                ang = 180.0
+            edge_dihedral_degrees.append(round(float(ang), 4))
+            edge_is_sharp.append(ang >= SHARP_DEG)
+        
         
         data = {
             "mesh_metadata": mesh_metadata,
             "geometry": {
                 "vertices": geometry_vertices,
                 "edge_index": edge_index,
-                "face_index": face_index
+                "face_index": face_index,
+                "edge_dihedral_degrees": edge_dihedral_degrees,
+                "edge_is_sharp": edge_is_sharp
             },
             "labels": {
                 "seam_edges_indices": seam_edges_indices
