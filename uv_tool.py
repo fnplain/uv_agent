@@ -639,12 +639,12 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
             vn = normal_matrix @ v.normal
             if vn.length != 0:
                 vn.normalize()
-                vert_world_pos.append([round(float(norm_pos.x), 6),
-                           round(float(norm_pos.y), 6),
-                           round(float(norm_pos.z), 6)])
-                vert_world_norm.append([round(float(vn.x), 6),
-                                        round(float(vn.y), 6),
-                                        round(float(vn.z), 6)])
+                vert_world_pos.append([round(float(norm_pos.x), 4),
+                           round(float(norm_pos.y), 4),
+                           round(float(norm_pos.z), 4)])
+                vert_world_norm.append([round(float(vn.x), 4),
+                                        round(float(vn.y), 4),
+                                        round(float(vn.z), 4)])
 
         neighbors = {i: set() for i in range(len(mesh.vertices))}
         for e in mesh.edges:
@@ -676,7 +676,7 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
                 curvature = 0.0
             else:
                 d = max(-1.0, min(1.0, vn.dot(ann)))
-                curvature = round(max(0.0, 1.0 - d), 6)
+                curvature = round(max(0.0, 1.0 - d), 4)
             geometry_vertices.append({
                 "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
                 "normal": [float(vert_world_norm[i][0]), float(vert_world_norm[i][1]), float(vert_world_norm[i][2])],
