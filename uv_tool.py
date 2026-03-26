@@ -9,6 +9,7 @@ bl_info = {
 }
 
 import json
+from multiprocessing import context
 import urllib.request
 import urllib.error
 import re
@@ -16,6 +17,7 @@ import re
 import bpy
 import os
 import math
+from bpy_extras.io_utils import ExportHelper
 
 
 class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
@@ -564,6 +566,7 @@ class VIEW3D_PT_MyUVPanel(bpy.types.Panel):
         layout.operator(MESH_OT_ApplyProposedCuts.bl_idname, text="Apply Proposed Cuts")
         layout.operator(MESH_OT_ImportSeams.bl_idname, text="Apply Import Seams (raw)")
         layout.separator()
+        layout.operator(MESH_OT_ExportSeamGPTData.bl_idname, text="Export SeamGPT Data")
         # layout.prop(context.scene, "myuv_auto_call_ai")
         # layout.prop(context.scene, "myuv_ai_endpoint")
         # layout.prop(context.scene, "myuv_ai_model")
@@ -572,10 +575,127 @@ class VIEW3D_PT_MyUVPanel(bpy.types.Panel):
         # layout.prop(context.scene, "myuv_ai_organization")
         # layout.prop(context.scene, "myuv_ai_timeout")
 
+
+class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
+    bl_idname = "mesh.export_seamgpt"
+    bl_label = "Export SeamGPT Data"
+    bl_description = "Exports active object seam data to SeamGPT JSON format"
+    filename_ext = ".json"
+
+    filter_glob: bpy.props.StringProperty(
+        default="*.json",
+        options={'HIDDEN'},
+        maxlen=255,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
+
+    def execute(self, context):
+        import json
+        import mathutils
+
+        TARGET = 15360
+
+
+        obj = context.active_object
+        if obj.type != 'MESH':
+            self.report({'ERROR'}, "Active object is not a mesh.")
+            return {'CANCELLED'}
+        mesh = obj.data
+        
+
+        mesh_metadata = {
+            "name": obj.name,
+            "poly_count": len(mesh.polygons)
+        }
+
+
+        verts_world = []
+        for v in mesh.vertices:
+            wc = obj.matrix_world @ v.co
+            verts_world.append([float(wc.x), float(wc.y), float(wc.z)])
+
+
+        edge_midpoints = []
+        for e in mesh.edges:
+            a = obj.matrix_world @ mesh.vertices[e.vertices[0]].co
+            b = obj.matrix_world @ mesh.vertices[e.vertices[1]].co
+            mid = (a + b) / 2
+            edge_midpoints.append([float(mid.x), float(mid.y), float(mid.z)])
+
+
+
+        def sample_repeat(points, target):
+            if not points:
+                return [[0.0, 0.0, 0.0]] * target
+            n = len(points)
+            if n >= target:
+                step = n / target
+                return [[round(c, 6) for c in points[int(i * step)]] for i in range(target)]
+            res = []
+            i = 0
+            while len(res) < target:
+                p = points[i % n]
+                res.append([round(p[0], 6), round(p[1], 6), round(p[2], 6)])
+                i += 1
+            return res
+        
+        vertex_points = sample_repeat(verts_world, TARGET)
+        edge_points = sample_repeat(edge_midpoints, TARGET)
+        
+        seam_edges = []
+        ordered_list = []
+        
+        for e in mesh.edges:
+            if e.use_seam:
+                a = int(e.vertices[0])
+                b = int(e.vertices[1])
+                seam_edges.append((a, b))
+                
+                v1 = obj.matrix_world @ mesh.vertices[a].co
+                v2 = obj.matrix_world @ mesh.vertices[b].co
+                
+                start_coord, end_coord = sorted([list(v1), list(v2)], key=lambda x: (x[1], x[2], x[0]))
+                
+                if (Vector(start_coord) - v1).length < (Vector(start_coord) - v2).length:
+                    start_idx, end_idx = a, b
+                else:
+                    start_idx, end_idx = b, a    
+                ordered_list.append(((start_coord[1], start_coord[2], start_coord[0]), [start_idx, end_idx]))
+                
+        ordered_list.sort(key=lambda x: (x[0][0], x[0][1], x[0][2]))
+        ordered_segments = [pair for _, pair in ordered_list]
+        
+        
+        data = {
+            "mesh_metadata": mesh_metadata,
+            "shape_context": {
+                "vertex_points": vertex_points,
+                "edge_points": edge_points
+            },
+            "labels": { 
+                "seam_edges": seam_edges,
+                "ordered_segments": ordered_segments
+            }
+        }
+        
+        try:
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+        except Exception as exc:
+            self.report({'ERROR'}, f"Failed to write file: {exc}")
+            return {'CANCELLED'}
+         
+        self.report({'INFO'}, f"Saved SeamGPT data to {self.filepath}")
+        return {'FINISHED'} 
+
 classes = (
     MESH_OT_MyCustomUnwrapper,
     MESH_OT_ImportSeams,
     MESH_OT_ApplyProposedCuts,
+    MESH_OT_ExportSeamGPTData,
     VIEW3D_PT_MyUVPanel,
 )
 
