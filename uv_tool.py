@@ -608,9 +608,17 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         world_verts = [obj.matrix_world @ v.co for v in mesh.vertices]
         if world_verts:
             xs = [v.x for v in world_verts]; ys = [v.y for v in world_verts]; zs = [v.z for v in world_verts]
-            original_bounds = [round(max(xs)-min(xs), 6), round(max(ys)-min(ys), 6), round(max(zs)-min(zs), 6)]
+            bbox_min = Vector((min(xs), min(ys), min(zs)))
+            bbox_max = Vector((max(xs), max(ys), max(zs)))
+            original_bounds = [round(bbox_max.x - bbox_min.x, 6),
+                            round(bbox_max.y - bbox_min.y, 6),
+                            round(bbox_max.z - bbox_min.z, 6)]
         else:
+            bbox_min = bbox_max = Vector((0.0, 0.0, 0.0))
             original_bounds = [0.0, 0.0, 0.0]
+
+        center = (bbox_min + bbox_max) * 0.5
+        scale = max(original_bounds) or 1e-9
         
         mesh_metadata = {
             "name": obj.name,
@@ -627,11 +635,16 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         vert_world_norm = []
         for v in mesh.vertices:
             wp = obj.matrix_world @ v.co
+            norm_pos = (wp - center) / scale
             vn = normal_matrix @ v.normal
             if vn.length != 0:
                 vn.normalize()
-            vert_world_pos.append([round(float(wp.x), 6), round(float(wp.y), 6), round(float(wp.z), 6)])
-            vert_world_norm.append([round(float(vn.x), 6), round(float(vn.y), 6), round(float(vn.z), 6)])
+                vert_world_pos.append([round(float(norm_pos.x), 6),
+                           round(float(norm_pos.y), 6),
+                           round(float(norm_pos.z), 6)])
+                vert_world_norm.append([round(float(vn.x), 6),
+                                        round(float(vn.y), 6),
+                                        round(float(vn.z), 6)])
 
         neighbors = {i: set() for i in range(len(mesh.vertices))}
         for e in mesh.edges:
