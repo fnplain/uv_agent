@@ -213,6 +213,9 @@ class SeamGPTBatch:
     edge_points: torch.Tensor
     edge_mask: torch.Tensor
     ratio_r: torch.Tensor
+    raw_ratio_r: float
+    clamped_ratio_r: float
+    has_seams: bool
     seam_segment_count: int
     seam_token_count: int
 
@@ -224,7 +227,7 @@ def _as_float_tensor(values: Any, field_name: str) -> torch.Tensor:
         raise ValueError(f"Failed to parse field '{field_name}' as float tensor: {exc}") from exc
 
 
-def load_seamgpt_batch(json_path: str) -> SeamGPTBatch:
+def load_seamgpt_batch(json_path: str, ratio_source: str = "clamped") -> SeamGPTBatch:
     with open(json_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
@@ -254,10 +257,17 @@ def load_seamgpt_batch(json_path: str) -> SeamGPTBatch:
         raise ValueError("edge mask length must match edge point count")
 
     length_conditioning = payload.get("length_conditioning") or {}
-    ratio_value = length_conditioning.get("clamped_ratio_R", length_conditioning.get("ratio_R", DEFAULT_RATIO_MIN))
-    ratio_r = _as_float_tensor([float(ratio_value)], "length_conditioning.clamped_ratio_R")
+    raw_ratio_r = float(length_conditioning.get("ratio_R", DEFAULT_RATIO_MIN))
+    clamped_ratio_r = float(length_conditioning.get("clamped_ratio_R", raw_ratio_r))
+
+    ratio_key = ratio_source.strip().lower()
+    if ratio_key not in {"raw", "clamped"}:
+        raise ValueError("ratio_source must be 'raw' or 'clamped'")
+    ratio_value = raw_ratio_r if ratio_key == "raw" else clamped_ratio_r
+    ratio_r = _as_float_tensor([ratio_value], f"length_conditioning.{ratio_key}_ratio_R")
 
     labels = payload.get("labels") or {}
+    has_seams = bool(labels.get("has_seams", labels.get("seam_segment_count", 0) > 0))
     seam_segment_count = int(labels.get("seam_segment_count", 0))
     seam_token_count = int(labels.get("seam_token_count", 0))
 
@@ -267,6 +277,9 @@ def load_seamgpt_batch(json_path: str) -> SeamGPTBatch:
         edge_points=edge_points.unsqueeze(0),
         edge_mask=edge_mask.unsqueeze(0),
         ratio_r=ratio_r,
+        raw_ratio_r=raw_ratio_r,
+        clamped_ratio_r=clamped_ratio_r,
+        has_seams=has_seams,
         seam_segment_count=seam_segment_count,
         seam_token_count=seam_token_count,
     )
@@ -285,21 +298,71 @@ def _summarize_batch(batch: SeamGPTBatch) -> str:
     vertex_valid = int(batch.vertex_mask.sum().item())
     edge_valid = int(batch.edge_mask.sum().item())
 
+    vertex_valid_pct = (100.0 * vertex_valid / max(vertex_count, 1))
+    edge_valid_pct = (100.0 * edge_valid / max(edge_count, 1))
+
     expected = (
         f"expected vertex/edge = {EXPECTED_VERTEX_POINTS}/{EXPECTED_EDGE_POINTS}, "
         f"got {vertex_count}/{edge_count}"
     )
-    validity = f"valid vertex/edge points = {vertex_valid}/{edge_valid}"
-    label_info = (
-        f"seam segments = {batch.seam_segment_count}, seam tokens = {batch.seam_token_count}, "
-        f"ratio R = {float(batch.ratio_r.item()):.6f}"
+    validity = (
+        f"valid vertex/edge points = {vertex_valid}/{edge_valid} "
+        f"({vertex_valid_pct:.2f}%/{edge_valid_pct:.2f}%)"
     )
-    return "\n".join([expected, validity, label_info])
+    label_info = (
+        f"has_seams = {batch.has_seams}, seam segments = {batch.seam_segment_count}, "
+        f"seam tokens = {batch.seam_token_count}"
+    )
+    ratio_info = (
+        f"ratio R (raw/clamped/used) = {batch.raw_ratio_r:.6f}/"
+        f"{batch.clamped_ratio_r:.6f}/{float(batch.ratio_r.item()):.6f}"
+    )
+    return "\n".join([expected, validity, label_info, ratio_info])
+
+
+def _quality_notes(batch: SeamGPTBatch) -> str:
+    notes = []
+
+    vertex_count = int(batch.vertex_points.size(1))
+    edge_count = int(batch.edge_points.size(1))
+    vertex_valid = int(batch.vertex_mask.sum().item())
+    edge_valid = int(batch.edge_mask.sum().item())
+
+    vertex_valid_pct = vertex_valid / max(vertex_count, 1)
+    edge_valid_pct = edge_valid / max(edge_count, 1)
+
+    expected_tokens = 2 + (6 * int(batch.seam_segment_count))
+    if expected_tokens != int(batch.seam_token_count):
+        notes.append(
+            f"- Token count mismatch: expected {expected_tokens} from seam segments but got {batch.seam_token_count}."
+        )
+    else:
+        notes.append("- Token count is consistent with segment count (2 + 6 * segments).")
+
+    if not batch.has_seams or batch.seam_segment_count == 0:
+        notes.append(
+            "- No seam supervision signal in this sample (only SOS/EOS target); good for pipeline sanity check, weak for learning seams."
+        )
+
+    if vertex_valid_pct < 0.05 or edge_valid_pct < 0.05:
+        notes.append(
+            "- Heavy padding detected (>95% in at least one stream); masked pooling handles it, but geometric diversity per sample is low."
+        )
+
+    if (not batch.has_seams) and batch.raw_ratio_r <= 1e-9 and batch.clamped_ratio_r >= DEFAULT_RATIO_MIN:
+        notes.append(
+            "- Raw ratio is 0 while clamped ratio is at minimum bound; this is expected from clamping but can be misleading for zero-seam samples."
+        )
+
+    if not notes:
+        notes.append("- No obvious data-quality issues detected for this sample.")
+
+    return "\n".join(notes)
 
 
 def run_demo(args: argparse.Namespace) -> None:
     device = _resolve_device(args.device)
-    batch = load_seamgpt_batch(args.input)
+    batch = load_seamgpt_batch(args.input, ratio_source=args.ratio_source)
 
     model = SeamPointCloudEncoderPOC(
         shape_latent_dim=args.shape_latent_dim,
@@ -320,6 +383,9 @@ def run_demo(args: argparse.Namespace) -> None:
     print("Loaded batch summary:")
     print(_summarize_batch(batch))
     print("")
+    print("Quality notes:")
+    print(_quality_notes(batch))
+    print("")
     print("Encoder output shapes:")
     print(f"shape_latent:      {tuple(outputs['shape_latent'].shape)}")
     print(f"length_embedding:  {tuple(outputs['length_embedding'].shape)}")
@@ -333,6 +399,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--device",
         default="auto",
         help="Torch device: auto, cpu, cuda, cuda:0, ...",
+    )
+    parser.add_argument(
+        "--ratio-source",
+        choices=["raw", "clamped"],
+        default="clamped",
+        help="Which length ratio to feed into the embedding.",
     )
     parser.add_argument("--shape-latent-dim", type=int, default=512)
     parser.add_argument("--length-embed-dim", type=int, default=128)
