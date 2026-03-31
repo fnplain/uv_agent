@@ -20,6 +20,172 @@ import math
 from bpy_extras.io_utils import ExportHelper
 
 
+DEFAULT_SEAM_TOKEN_BINS = 256
+DEFAULT_VERTEX_POINT_TARGET = 30720
+DEFAULT_EDGE_POINT_TARGET = 30720
+DEFAULT_LENGTH_RATIO_MIN = 0.1
+DEFAULT_LENGTH_RATIO_MAX = 0.35
+
+
+def _point_to_xyz(point):
+    if hasattr(point, "x") and hasattr(point, "y") and hasattr(point, "z"):
+        return (float(point.x), float(point.y), float(point.z))
+    return (float(point[0]), float(point[1]), float(point[2]))
+
+
+def _compute_normalization_metadata(world_vertices):
+    if not world_vertices:
+        return {
+            "bbox_min": [0.0, 0.0, 0.0],
+            "bbox_max": [0.0, 0.0, 0.0],
+            "center": [0.0, 0.0, 0.0],
+            "scale": 1e-9,
+            "original_bounds": [0.0, 0.0, 0.0],
+        }
+
+    coords = [_point_to_xyz(v) for v in world_vertices]
+    xs = [c[0] for c in coords]
+    ys = [c[1] for c in coords]
+    zs = [c[2] for c in coords]
+
+    bbox_min = [min(xs), min(ys), min(zs)]
+    bbox_max = [max(xs), max(ys), max(zs)]
+    bounds = [bbox_max[i] - bbox_min[i] for i in range(3)]
+    center = [(bbox_min[i] + bbox_max[i]) * 0.5 for i in range(3)]
+    scale = max(bounds)
+    if scale <= 0.0:
+        scale = 1e-9
+
+    return {
+        "bbox_min": [float(bbox_min[0]), float(bbox_min[1]), float(bbox_min[2])],
+        "bbox_max": [float(bbox_max[0]), float(bbox_max[1]), float(bbox_max[2])],
+        "center": [float(center[0]), float(center[1]), float(center[2])],
+        "scale": float(scale),
+        "original_bounds": [float(bounds[0]), float(bounds[1]), float(bounds[2])],
+    }
+
+
+def _normalize_xyz(xyz, center, scale):
+    return [
+        (float(xyz[0]) - float(center[0])) / float(scale),
+        (float(xyz[1]) - float(center[1])) / float(scale),
+        (float(xyz[2]) - float(center[2])) / float(scale),
+    ]
+
+
+def _yzx_sort_key(coord):
+    return (float(coord[1]), float(coord[2]), float(coord[0]))
+
+
+def _build_ordered_seam_segments(mesh, world_vertices, normalization_meta):
+    if not world_vertices:
+        return [], []
+
+    center = normalization_meta.get("center", [0.0, 0.0, 0.0])
+    scale = float(normalization_meta.get("scale", 1e-9))
+    if scale <= 0.0:
+        scale = 1e-9
+
+    normalized_vertices = [
+        _normalize_xyz(_point_to_xyz(v), center, scale)
+        for v in world_vertices
+    ]
+
+    records = []
+    for edge in mesh.edges:
+        if not getattr(edge, "use_seam", False):
+            continue
+
+        edge_index = int(edge.index)
+        v0 = int(edge.vertices[0])
+        v1 = int(edge.vertices[1])
+        if v0 >= len(normalized_vertices) or v1 >= len(normalized_vertices):
+            continue
+
+        p0 = normalized_vertices[v0]
+        p1 = normalized_vertices[v1]
+        key0 = _yzx_sort_key(p0)
+        key1 = _yzx_sort_key(p1)
+        if key1 < key0:
+            p0, p1 = p1, p0
+            key0, key1 = key1, key0
+
+        records.append((key0, key1, edge_index, [p0, p1]))
+
+    records.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    ordered_segments = []
+    ordered_edge_indices = []
+    for _, _, edge_index, segment in records:
+        ordered_edge_indices.append(edge_index)
+        ordered_segments.append([
+            [float(segment[0][0]), float(segment[0][1]), float(segment[0][2])],
+            [float(segment[1][0]), float(segment[1][1]), float(segment[1][2])],
+        ])
+
+    return ordered_segments, ordered_edge_indices
+
+
+def _quantize_coord_to_bin(value, num_bins):
+    if num_bins < 2:
+        raise ValueError("num_bins must be >= 2")
+    clamped = max(-1.0, min(1.0, float(value)))
+    return int((clamped + 1.0) * 0.5 * (num_bins - 1))
+
+
+def _tokenize_ordered_segments(ordered_segments, num_bins=DEFAULT_SEAM_TOKEN_BINS):
+    if num_bins < 2:
+        raise ValueError("num_bins must be >= 2")
+
+    sos_token = 3 * num_bins
+    eos_token = sos_token + 1
+    token_sequence = [sos_token]
+
+    for segment in ordered_segments:
+        if not isinstance(segment, list) or len(segment) != 2:
+            continue
+        p0, p1 = segment
+        if len(p0) != 3 or len(p1) != 3:
+            continue
+
+        x0_bin = _quantize_coord_to_bin(p0[0], num_bins)
+        y0_bin = _quantize_coord_to_bin(p0[1], num_bins)
+        z0_bin = _quantize_coord_to_bin(p0[2], num_bins)
+        x1_bin = _quantize_coord_to_bin(p1[0], num_bins)
+        y1_bin = _quantize_coord_to_bin(p1[1], num_bins)
+        z1_bin = _quantize_coord_to_bin(p1[2], num_bins)
+
+        token_sequence.extend([
+            x0_bin,
+            num_bins + y0_bin,
+            (2 * num_bins) + z0_bin,
+            x1_bin,
+            num_bins + y1_bin,
+            (2 * num_bins) + z1_bin,
+        ])
+
+    token_sequence.append(eos_token)
+
+    metadata = {
+        "num_bins": int(num_bins),
+        "vocab_size": int((3 * num_bins) + 2),
+        "axis_offsets": {
+            "x": 0,
+            "y": int(num_bins),
+            "z": int(2 * num_bins),
+        },
+        "special_tokens": {
+            "SOS": int(sos_token),
+            "EOS": int(eos_token),
+        },
+        "tokens_per_segment": 6,
+        "segment_token_order": ["x1", "y1", "z1", "x2", "y2", "z2"],
+        "seam_sort_axis_order": "yzx",
+    }
+
+    return token_sequence, metadata
+
+
 class MESH_OT_MyCustomUnwrapper(bpy.types.Operator):
     bl_idname = "mesh.my_custom_unwrapper"
     bl_label = "Unwrap My Mesh"
@@ -595,7 +761,8 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         from mathutils import Vector
         import math
 
-        TARGET = 15360
+        vertex_target = DEFAULT_VERTEX_POINT_TARGET
+        edge_target = DEFAULT_EDGE_POINT_TARGET
 
 
         obj = context.active_object
@@ -690,6 +857,27 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         
         # seam edge indices
         seam_edges_indices = [int(e.index) for e in mesh.edges if getattr(e, "use_seam", False)]
+
+        normalization_meta = _compute_normalization_metadata(world_verts)
+        ordered_segments, ordered_seam_edges_indices = _build_ordered_seam_segments(
+            mesh,
+            world_verts,
+            normalization_meta,
+        )
+        seam_token_sequence, tokenization_meta = _tokenize_ordered_segments(
+            ordered_segments,
+            num_bins=DEFAULT_SEAM_TOKEN_BINS,
+        )
+
+        seam_segment_count = len(ordered_segments)
+        seam_token_count = len(seam_token_sequence)
+        has_seams = seam_segment_count > 0
+        vertex_count = len(mesh.vertices)
+        seam_length_ratio = (float(seam_segment_count) / float(vertex_count)) if vertex_count > 0 else 0.0
+        clamped_seam_length_ratio = min(
+            DEFAULT_LENGTH_RATIO_MAX,
+            max(DEFAULT_LENGTH_RATIO_MIN, seam_length_ratio),
+        )
         
         face_index = [[int(v) for v in poly.vertices] for poly in mesh.polygons]
         
@@ -755,8 +943,8 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
             mn = (mid - center) / scale
             edge_midpoints.append([round(float(mn.x), 4), round(float(mn.y), 4), round(float(mn.z), 4)])
             
-        vertex_points, vertex_mask = sample_repeat_with_mask(verts_world, TARGET)
-        edge_points, edge_mask = sample_repeat_with_mask(edge_midpoints, TARGET)
+        vertex_points, vertex_mask = sample_repeat_with_mask(verts_world, vertex_target)
+        edge_points, edge_mask = sample_repeat_with_mask(edge_midpoints, edge_target)
         
         data = {
             "mesh_metadata": mesh_metadata,
@@ -768,12 +956,37 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
                 "face_index": face_index,
             },
             "labels": {
-                "seam_edges_indices": seam_edges_indices
+                "seam_edges_indices": seam_edges_indices,
+                "ordered_seam_edges_indices_yzx": ordered_seam_edges_indices,
+                "ordered_seam_segments_normalized": ordered_segments,
+                "seam_segment_count": seam_segment_count,
+                "seam_token_count": seam_token_count,
+                "has_seams": has_seams,
             },
             "shape_context": {
                 "vertex_points": vertex_points,
                 "edge_points": edge_points,
-                "padding_mask": vertex_mask 
+                "vertex_padding_mask": vertex_mask,
+                "edge_padding_mask": edge_mask,
+                "padding_mask": vertex_mask,
+            },
+            "point_cloud_sampling": {
+                "vertex_points_raw_count": len(verts_world),
+                "vertex_points_target": vertex_target,
+                "edge_points_raw_count": len(edge_midpoints),
+                "edge_points_target": edge_target,
+            },
+            "normalization": normalization_meta,
+            "length_conditioning": {
+                "ratio_R": seam_length_ratio,
+                "clamped_ratio_R": clamped_seam_length_ratio,
+                "clamp_range": [DEFAULT_LENGTH_RATIO_MIN, DEFAULT_LENGTH_RATIO_MAX],
+                "seam_segment_count": seam_segment_count,
+                "vertex_count": vertex_count,
+            },
+            "tokenization": {
+                "seam_token_sequence": seam_token_sequence,
+                "tokenizer": tokenization_meta,
             },
         }
         
@@ -841,14 +1054,39 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         #     }
         # }
         
+        out_dir = os.path.dirname(self.filepath) or os.getcwd()
+        ordered_seams_path = os.path.join(out_dir, "ordered_seams.json")
+        seam_tokens_path = os.path.join(out_dir, "seam_tokens.json")
+
         try:
             with open(self.filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4)
+            with open(ordered_seams_path, 'w', encoding='utf-8') as f:
+                json.dump(ordered_segments, f, indent=2)
+            with open(seam_tokens_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "seam_token_sequence": seam_token_sequence,
+                    "tokenizer": tokenization_meta,
+                    "seam_segment_count": seam_segment_count,
+                    "seam_token_count": seam_token_count,
+                    "has_seams": has_seams,
+                    "length_conditioning": {
+                        "ratio_R": seam_length_ratio,
+                        "clamped_ratio_R": clamped_seam_length_ratio,
+                        "clamp_range": [DEFAULT_LENGTH_RATIO_MIN, DEFAULT_LENGTH_RATIO_MAX],
+                    },
+                }, f, indent=2)
         except Exception as exc:
             self.report({'ERROR'}, f"Failed to write file: {exc}")
             return {'CANCELLED'}
+
+        if not has_seams:
+            self.report({'WARNING'}, "No seam edges detected; seam token sequence contains only SOS/EOS.")
          
-        self.report({'INFO'}, f"Saved SeamGPT data to {self.filepath}")
+        self.report(
+            {'INFO'},
+            f"Saved SeamGPT data, ordered seams, and seam tokens to {out_dir}",
+        )
         return {'FINISHED'} 
 
 classes = (
