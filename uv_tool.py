@@ -746,10 +746,40 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
     bl_description = "Exports active object seam data to SeamGPT JSON format"
     filename_ext = ".json"
 
-    filter_glob: bpy.props.StringProperty(
+    filter_glob: bpy.props.StringProperty(  # pyright: ignore[reportInvalidTypeForm]
         default="*.json",
         options={'HIDDEN'},
         maxlen=255,
+    )
+
+    compact_json: bpy.props.BoolProperty(  # pyright: ignore[reportInvalidTypeForm]
+        name="Compact JSON",
+        description="Write JSON without indentation to reduce file size",
+        default=True,
+    )
+
+    write_sidecar_files: bpy.props.BoolProperty(  # pyright: ignore[reportInvalidTypeForm]
+        name="Write Sidecar Files",
+        description="Also write ordered_seams.json and seam_tokens.json",
+        default=False,
+    )
+
+    include_geometry_payload: bpy.props.BoolProperty(  # pyright: ignore[reportInvalidTypeForm]
+        name="Include Heavy Geometry",
+        description="Include per-vertex geometry and edge sharpness arrays",
+        default=True,
+    )
+
+    include_legacy_padding_mask: bpy.props.BoolProperty(  # pyright: ignore[reportInvalidTypeForm]
+        name="Include Legacy Padding Mask",
+        description="Also write shape_context.padding_mask for older consumers",
+        default=False,
+    )
+
+    require_seams: bpy.props.BoolProperty(  # pyright: ignore[reportInvalidTypeForm]
+        name="Require Seams",
+        description="Cancel export when no seam edges are present",
+        default=False,
     )
 
     @classmethod
@@ -878,6 +908,13 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
             DEFAULT_LENGTH_RATIO_MAX,
             max(DEFAULT_LENGTH_RATIO_MIN, seam_length_ratio),
         )
+
+        if self.require_seams and not has_seams:
+            self.report(
+                {'WARNING'},
+                "No seam edges detected; export cancelled because 'Require Seams' is enabled.",
+            )
+            return {'CANCELLED'}
         
         face_index = [[int(v) for v in poly.vertices] for poly in mesh.polygons]
         
@@ -945,16 +982,31 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
             
         vertex_points, vertex_mask = sample_repeat_with_mask(verts_world, vertex_target)
         edge_points, edge_mask = sample_repeat_with_mask(edge_midpoints, edge_target)
+
+        geometry_payload = {
+            "edge_index": edge_index,
+            "face_index": face_index,
+        }
+        if self.include_geometry_payload:
+            geometry_payload.update({
+                "vertices": geometry_vertices,
+                "edge_dihedral_degrees": edge_dihedral_degrees,
+                "edge_is_sharp": edge_is_sharp,
+            })
+
+        shape_context_payload = {
+            "vertex_points": vertex_points,
+            "edge_points": edge_points,
+            "vertex_padding_mask": vertex_mask,
+            "edge_padding_mask": edge_mask,
+        }
+        if self.include_legacy_padding_mask:
+            # Keep backward compatibility only when explicitly requested.
+            shape_context_payload["padding_mask"] = list(vertex_mask)
         
         data = {
             "mesh_metadata": mesh_metadata,
-            "geometry": {
-                "vertices": geometry_vertices,
-                "edge_index": edge_index,
-                "edge_dihedral_degrees": edge_dihedral_degrees,
-                "edge_is_sharp": edge_is_sharp,
-                "face_index": face_index,
-            },
+            "geometry": geometry_payload,
             "labels": {
                 "seam_edges_indices": seam_edges_indices,
                 "ordered_seam_edges_indices_yzx": ordered_seam_edges_indices,
@@ -963,13 +1015,7 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
                 "seam_token_count": seam_token_count,
                 "has_seams": has_seams,
             },
-            "shape_context": {
-                "vertex_points": vertex_points,
-                "edge_points": edge_points,
-                "vertex_padding_mask": vertex_mask,
-                "edge_padding_mask": edge_mask,
-                "padding_mask": vertex_mask,
-            },
+            "shape_context": shape_context_payload,
             "point_cloud_sampling": {
                 "vertex_points_raw_count": len(verts_world),
                 "vertex_points_target": vertex_target,
@@ -1058,24 +1104,27 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         ordered_seams_path = os.path.join(out_dir, "ordered_seams.json")
         seam_tokens_path = os.path.join(out_dir, "seam_tokens.json")
 
+        dump_kwargs = {"separators": (",", ":")} if self.compact_json else {"indent": 2}
+
         try:
             with open(self.filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4)
-            with open(ordered_seams_path, 'w', encoding='utf-8') as f:
-                json.dump(ordered_segments, f, indent=2)
-            with open(seam_tokens_path, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "seam_token_sequence": seam_token_sequence,
-                    "tokenizer": tokenization_meta,
-                    "seam_segment_count": seam_segment_count,
-                    "seam_token_count": seam_token_count,
-                    "has_seams": has_seams,
-                    "length_conditioning": {
-                        "ratio_R": seam_length_ratio,
-                        "clamped_ratio_R": clamped_seam_length_ratio,
-                        "clamp_range": [DEFAULT_LENGTH_RATIO_MIN, DEFAULT_LENGTH_RATIO_MAX],
-                    },
-                }, f, indent=2)
+                json.dump(data, f, **dump_kwargs)
+            if self.write_sidecar_files:
+                with open(ordered_seams_path, 'w', encoding='utf-8') as f:
+                    json.dump(ordered_segments, f, **dump_kwargs)
+                with open(seam_tokens_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        "seam_token_sequence": seam_token_sequence,
+                        "tokenizer": tokenization_meta,
+                        "seam_segment_count": seam_segment_count,
+                        "seam_token_count": seam_token_count,
+                        "has_seams": has_seams,
+                        "length_conditioning": {
+                            "ratio_R": seam_length_ratio,
+                            "clamped_ratio_R": clamped_seam_length_ratio,
+                            "clamp_range": [DEFAULT_LENGTH_RATIO_MIN, DEFAULT_LENGTH_RATIO_MAX],
+                        },
+                    }, f, **dump_kwargs)
         except Exception as exc:
             self.report({'ERROR'}, f"Failed to write file: {exc}")
             return {'CANCELLED'}
@@ -1083,10 +1132,12 @@ class MESH_OT_ExportSeamGPTData(bpy.types.Operator, ExportHelper):
         if not has_seams:
             self.report({'WARNING'}, "No seam edges detected; seam token sequence contains only SOS/EOS.")
          
-        self.report(
-            {'INFO'},
-            f"Saved SeamGPT data, ordered seams, and seam tokens to {out_dir}",
-        )
+        if self.write_sidecar_files:
+            save_message = "Saved SeamGPT data plus sidecar files"
+        else:
+            save_message = "Saved SeamGPT data"
+
+        self.report({'INFO'}, f"{save_message} to {out_dir}")
         return {'FINISHED'} 
 
 classes = (
